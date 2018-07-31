@@ -1,0 +1,147 @@
+# coding: utf-8
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from copy import deepcopy
+
+class Hp():
+    def __init__(self):
+        self.lr_out = 0.2
+        self.lr_in = 0.3
+        self.gamma = 0.96
+        self.n_update = 200
+        self.len_rollout = 150
+        self.batch_size = 128
+        self.seed = 42
+
+hp = Hp()
+
+class IPD():
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+        self.M = np.array([[-2,0],[-3,-1]])
+        self.S = np.array([[1,2],[3,4]])
+
+    def reset(self):
+        return [np.zeros(self.batch_size)]*2
+
+    def step(self, actions1, actions2):
+        rewards1 = self.M[actions1, actions2]
+        rewards2 = self.M[actions2, actions1]
+        states1 = self.S[actions1, actions2]
+        states2 = self.S[actions2, actions1]
+        return rewards1, rewards2, states1, states2
+
+ipd = IPD(hp.batch_size)
+
+def phi(x1,x2):
+    return [x1*x2, x1*(1-x2), (1-x1)*x2,(1-x1)*(1-x2)]
+
+def true_objective(theta1, theta2, ipd):
+    p1 = torch.sigmoid(theta1)
+    p2 = torch.sigmoid(theta2)
+    p0 = (p1[0], p2[0])
+    p = (p1[1:], p2[1:])
+    # create initial laws, transition matrix and rewards:
+    P0 = torch.stack(phi(*p0), dim=0).view(1,-1)
+    P = torch.stack(phi(*p), dim=1)
+    R = torch.from_numpy(ipd.M).view(-1,1).float()
+    # the true value to optimize:
+    objective = (P0.mm(torch.inverse(torch.eye(4) - hp.gamma*P))).mm(R)
+    return -objective #want to minimize -objective
+
+def act(batch_states, theta):
+    batch_states = torch.from_numpy(batch_states).long()
+    probs = torch.sigmoid(theta)[batch_states]
+    actions = (torch.rand(*probs.size())>probs).long().numpy()
+    torch_actions = torch.from_numpy(actions).float()
+    log_probs_actions = torch.log(torch_actions*(1-probs) + (1-torch_actions)*probs)
+    return actions, log_probs_actions
+
+def get_gradient(objective, theta):
+    # create differentiable gradient for 2nd orders:
+    grad_objective = torch.autograd.grad(objective, (theta), create_graph=True)[0]
+    return grad_objective
+
+def step(theta1, theta2):
+    # just to evaluate progress:
+    s1, s2 = ipd.reset()
+    score1 = 0
+    score2 = 0
+    for t in range(hp.len_rollout):
+        a1, lp1 = act(s1, theta1)
+        a2, lp2 = act(s2, theta2)
+        r1, r2, s1, s2 = ipd.step(a1, a2)
+        # cumulate scores
+        score1 += np.mean(r1)/float(hp.len_rollout)
+        score2 += np.mean(r2)/float(hp.len_rollout)
+    return score1, score2
+
+class Agent():
+    def __init__(self):
+        # init theta and its optimizer
+        self.theta = nn.Parameter(torch.zeros(5, requires_grad=True))
+        self.theta_optimizer = torch.optim.Adam((self.theta,),lr=hp.lr_out)
+
+    def theta_update(self, objective):
+        self.theta_optimizer.zero_grad()
+        objective.backward(retain_graph=True)
+        self.theta_optimizer.step()
+
+    def in_lookahead(self, other_theta):
+        other_objective = true_objective(other_theta, self.theta, ipd)
+        grad = get_gradient(other_objective, other_theta)
+        return grad
+
+    def out_lookahead(self, other_theta):
+        objective = true_objective(self.theta, other_theta, ipd)
+        self.theta_update(objective)
+
+def play(agent1, agent2, n_lookaheads):
+    joint_scores = []
+    print("start iterations with", n_lookaheads, "lookaheads:")
+    for update in range(hp.n_update):
+        # copy other's parameters:
+        theta1_ = torch.tensor(agent1.theta.detach(), requires_grad=True)
+        theta2_ = torch.tensor(agent2.theta.detach(), requires_grad=True)
+
+        for k in range(n_lookaheads):
+            # estimate other's gradients from in_lookahead:
+            grad2 = agent1.in_lookahead(theta2_)
+            grad1 = agent2.in_lookahead(theta1_)
+            # update other's theta
+            theta2_ = theta2_ - hp.lr_in * grad2
+            theta1_ = theta1_ - hp.lr_in * grad1
+
+        # update own parameters from out_lookahead:
+        agent1.out_lookahead(theta2_)
+        agent2.out_lookahead(theta1_)
+
+        # evaluate:
+        score = step(agent1.theta, agent2.theta)
+        joint_scores.append(0.5*(score[0] + score[1]))
+
+        # print
+        if update%10==0 :
+            p1 = [p.item() for p in torch.sigmoid(agent1.theta)]
+            p2 = [p.item() for p in torch.sigmoid(agent2.theta)]
+            print('update', update, 'score (%.3f,%.3f)' % (score[0], score[1]) , 'policy (agent1) = {%.3f, %.3f, %.3f, %.3f, %.3f}' % (p1[0], p1[1], p1[2], p1[3], p1[4]),' (agent2) = {%.3f, %.3f, %.3f, %.3f, %.3f}' % (p2[0], p2[1], p2[2], p2[3], p2[4]))
+
+    return joint_scores
+
+# plot progress:
+if __name__=="__main__":
+
+    colors = ['b','c','m','r']
+
+    for i in range(4):
+        torch.manual_seed(hp.seed)
+        scores = play(Agent(), Agent(), i)
+        plt.plot(scores, colors[i], label=str(i)+" lookaheads")
+
+    plt.legend()
+    plt.xlabel('rollouts')
+    plt.ylabel('joint score')
+    plt.show()
