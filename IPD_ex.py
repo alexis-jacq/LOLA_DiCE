@@ -41,7 +41,7 @@ def phi(x1,x2):
 
 def true_objective(theta1, theta2, ipd):
     p1 = torch.sigmoid(theta1)
-    p2 = torch.sigmoid(theta2)
+    p2 = torch.sigmoid(theta2[[0,1,3,2,4]])
     p0 = (p1[0], p2[0])
     p = (p1[1:], p2[1:])
     # create initial laws, transition matrix and rewards:
