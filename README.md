@@ -3,11 +3,11 @@ Pytorch implementation of LOLA (https://arxiv.org/abs/1709.04326) using DiCE (ht
 
 ## Quick results:
 
-### Results on IPD using DiCE approximation of gradients 
+### Results on IPD using DiCE 
 [lr_in=0.3, lr_out=0.2, lr_v=0.1, batch_size=128, len_rollout=150, use_baseline=True]
 ![ipd_with_dice](images/ipd_dice.png)
 
-### Results on IPD using DiCE with opponent modelling approximation of gradients 
+### Results on IPD using DiCE and opponent modelling
 [lr_in=0.3, lr_out=0.2, lr_v=0.1, batch_size=128, len_rollout=150, use_baseline=True]
 ![ipd_with_dice](images/ipd_dice_om.png)
 (It seems that 2 lookaheads is the most stable model with this set of hyperparameters)
