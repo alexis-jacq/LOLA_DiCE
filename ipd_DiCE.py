@@ -4,7 +4,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+from torch.distributions import Bernoulli
 from copy import deepcopy
+
+from envs import IPD
 
 class Hp():
     def __init__(self):
@@ -20,26 +23,10 @@ class Hp():
 
 hp = Hp()
 
+ipd = IPD(hp.len_rollout, hp.batch_size)
+
 def magic_box(x):
     return torch.exp(x - x.detach())
-
-class IPD():
-    def __init__(self, batch_size):
-        self.batch_size = batch_size
-        self.M = np.array([[-2,0],[-3,-1]])
-        self.S = np.array([[1,2],[3,4]])
-
-    def reset(self):
-        return [np.zeros(self.batch_size)]*2
-
-    def step(self, actions1, actions2):
-        rewards1 = self.M[actions1, actions2]
-        rewards2 = self.M[actions2, actions1]
-        states1 = self.S[actions1, actions2]
-        states2 = self.S[actions2, actions1]
-        return rewards1, rewards2, states1, states2
-
-ipd = IPD(hp.batch_size)
 
 class Memory():
     def __init__(self):
@@ -89,10 +76,10 @@ class Memory():
 def act(batch_states, theta, values):
     batch_states = torch.from_numpy(batch_states).long()
     probs = torch.sigmoid(theta)[batch_states]
-    actions = (torch.rand(*probs.size())>probs).long().numpy()
-    torch_actions = torch.from_numpy(actions).float()
-    log_probs_actions = torch.log(torch_actions*(1-probs) + (1-torch_actions)*probs)
-    return actions, log_probs_actions, values[batch_states]
+    m = Bernoulli(1-probs)
+    actions = m.sample()
+    log_probs_actions = m.log_prob(actions)
+    return actions.numpy().astype(int), log_probs_actions, values[batch_states]
 
 def get_gradient(objective, theta):
     # create differentiable gradient for 2nd orders:
@@ -101,17 +88,17 @@ def get_gradient(objective, theta):
 
 def step(theta1, theta2, values1, values2):
     # just to evaluate progress:
-    s1, s2 = ipd.reset()
+    (s1, s2), _ = ipd.reset()
     score1 = 0
     score2 = 0
     for t in range(hp.len_rollout):
         a1, lp1, v1 = act(s1, theta1, values1)
         a2, lp2, v2 = act(s2, theta2, values2)
-        r1, r2, s1, s2 = ipd.step(a1, a2)
+        (s1, s2), (r1, r2),_,_ = ipd.step((a1, a2))
         # cumulate scores
         score1 += np.mean(r1)/float(hp.len_rollout)
         score2 += np.mean(r2)/float(hp.len_rollout)
-    return score1, score2
+    return (score1, score2)
 
 class Agent():
     def __init__(self):
@@ -133,12 +120,12 @@ class Agent():
         self.value_optimizer.step()
 
     def in_lookahead(self, other_theta, other_values):
-        s1, s2 = ipd.reset()
+        (s1, s2), _ = ipd.reset()
         other_memory = Memory()
         for t in range(hp.len_rollout):
             a1, lp1, v1 = act(s1, self.theta, self.values)
             a2, lp2, v2 = act(s2, other_theta, other_values)
-            r1, r2, s1, s2 = ipd.step(a1, a2)
+            (s1, s2), (r1, r2),_,_ = ipd.step((a1, a2))
             other_memory.add(lp2, lp1, v2, torch.from_numpy(r2).float())
 
         other_objective = other_memory.dice_objective()
@@ -146,12 +133,12 @@ class Agent():
         return grad
 
     def out_lookahead(self, other_theta, other_values):
-        s1, s2 = ipd.reset()
+        (s1, s2), _ = ipd.reset()
         memory = Memory()
         for t in range(hp.len_rollout):
             a1, lp1, v1 = act(s1, self.theta, self.values)
             a2, lp2, v2 = act(s2, other_theta, other_values)
-            r1, r2, s1, s2 = ipd.step(a1, a2)
+            (s1, s2), (r1, r2),_,_ = ipd.step((a1, a2))
             memory.add(lp1, lp2, v1, torch.from_numpy(r1).float())
 
         # update self theta
@@ -206,6 +193,6 @@ if __name__=="__main__":
         plt.plot(scores, colors[i], label=str(i)+" lookaheads")
 
     plt.legend()
-    plt.xlabel('rollouts')
-    plt.ylabel('joint score')
+    plt.xlabel('rollouts', fontsize=20)
+    plt.ylabel('joint score', fontsize=20)
     plt.show()
